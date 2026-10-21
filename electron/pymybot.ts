@@ -18,38 +18,38 @@ export interface BuildContext {
   settings: Settings;
 }
 
-function ident(value: unknown, what: string): string {
+export function ident(value: unknown, what: string): string {
   if (typeof value !== "string" || !IDENT.test(value)) throw new RequestError(`Invalid ${what}: ${String(value)}`);
   return value;
 }
 
-function text(value: unknown, what: string, max = MAX_TEXT_ARG): string {
+export function text(value: unknown, what: string, max = MAX_TEXT_ARG): string {
   if (typeof value !== "string" || !value.trim() || value.length > max || value.includes("\0")) {
     throw new RequestError(`Invalid ${what}`);
   }
   return value;
 }
 
-function int(value: unknown, low: number, high: number, what: string): number {
+export function int(value: unknown, low: number, high: number, what: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < low || value > high) {
     throw new RequestError(`${what} must be an integer in ${low}..${high}`);
   }
   return value;
 }
 
-function seconds(value: unknown): number {
+export function seconds(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 3600) {
     throw new RequestError("Timeout must be in (0, 3600] seconds");
   }
   return value;
 }
 
-function bool(value: unknown, what: string): boolean {
+export function bool(value: unknown, what: string): boolean {
   if (typeof value !== "boolean") throw new RequestError(`Invalid ${what}`);
   return value;
 }
 
-function settingPath(root: string, value: string): string {
+export function settingPath(root: string, value: string): string {
   return path.isAbsolute(value) ? path.normalize(value) : path.resolve(root, value);
 }
 

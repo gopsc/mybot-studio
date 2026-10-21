@@ -64,6 +64,55 @@ export interface StderrEvent {
   chunk: string;
 }
 
+export interface AgentOptions {
+  robot: string;
+  timeout: number;
+  allowHardware: boolean;
+  allowActions: boolean;
+  readVars: string[];
+  cameraVars: string[];
+  maxRequests: number;
+  maxToolCalls: number;
+}
+
+// Requests to the long-lived `pymybot serve` process; paths are workspace-relative.
+export type ServeRequest =
+  | { method: "session.status" }
+  | { method: "session.activate"; robot: string; allowHardware: boolean }
+  | { method: "session.deactivate" }
+  | { method: "run"; input: string; timeout: number; vars: Record<string, string> }
+  | { method: "apply-sql"; sql: string }
+  | { method: "sample"; name: string; count: number; intervalMs: number }
+  | ({ method: "agent.ask"; task: string } & AgentOptions)
+  | { method: "agent.reset" };
+
+export interface ServeError {
+  code: number;
+  message: string;
+  data?: { type?: string; tool_events?: unknown[] } & Record<string, unknown>;
+}
+
+export type ServeResult =
+  | { ok: true; result: any }
+  | { ok: false; error: ServeError; failure?: "declined" | "invalid-request" | "spawn" | "exited" };
+
+export interface SessionStatus {
+  state: "Active" | "Inactive";
+  robot?: string;
+  allowHardware?: boolean;
+  since?: number;
+  busy: string | null;
+  agent: boolean;
+}
+
+export type ServeEvent =
+  | { type: "session"; status: SessionStatus }
+  | { type: "sample"; id: string; index: number; value: unknown; t: number }
+  | { type: "agent"; id: string; event: Record<string, unknown> }
+  | { type: "confirm"; tool: string; arguments: unknown; approved: boolean }
+  | { type: "stderr"; chunk: string }
+  | { type: "exit"; code: number | null; signal: string | null };
+
 export interface StudioApi {
   platform: string;
   openWorkspace(): Promise<WorkspaceInfo | null>;
@@ -78,4 +127,7 @@ export interface StudioApi {
   run(id: string, request: PymybotRequest): Promise<RunResult>;
   cancel(id: string): Promise<void>;
   onStderr(listener: (event: StderrEvent) => void): () => void;
+  serve(id: string, request: ServeRequest): Promise<ServeResult>;
+  serveCancel(id: string): Promise<void>;
+  onServe(listener: (event: ServeEvent) => void): () => void;
 }

@@ -17,6 +17,7 @@ interface Props {
 export function Chart({ series, xLabels, visible }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chart = useRef<echarts.ECharts | null>(null);
+  const shown = useRef<string | null>(null);
 
   useEffect(() => {
     const instance = echarts.init(host.current!, "dark", { renderer: "canvas" });
@@ -31,6 +32,14 @@ export function Chart({ series, xLabels, visible }: Props) {
 
   useEffect(() => {
     const names = [...series.keys()];
+    const key = names.join("\n");
+    const data = names.map((name) => ({ name, data: series.get(name) }));
+    // Streaming updates with the same series merge, keeping legend toggles and zoom.
+    if (key === shown.current) {
+      chart.current?.setOption({ xAxis: { data: xLabels }, series: data });
+      return;
+    }
+    shown.current = key;
     chart.current?.setOption({
       backgroundColor: "transparent",
       animation: false,
@@ -40,7 +49,7 @@ export function Chart({ series, xLabels, visible }: Props) {
       xAxis: { type: "category", data: xLabels, name: "样本", nameLocation: "middle", nameGap: 26 },
       yAxis: { type: "value", scale: true },
       dataZoom: [{ type: "inside" }, { type: "slider", height: 14, bottom: 6 }],
-      series: names.map((name) => ({ name, type: "line", showSymbol: xLabels.length <= 60, connectNulls: false, data: series.get(name) })),
+      series: data.map((item) => ({ ...item, type: "line", showSymbol: false, connectNulls: false })),
     }, { notMerge: true });
   }, [series, xLabels]);
 

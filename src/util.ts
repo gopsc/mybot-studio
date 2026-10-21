@@ -1,4 +1,4 @@
-import type { RunResult, StudioApi } from "../shared/types";
+import type { RunResult, ServeResult, StudioApi } from "../shared/types";
 
 declare global {
   interface Window {
@@ -28,6 +28,30 @@ export function failureText(result: RunResult): string | null {
   if (result.failure) return result.failureMessage ?? result.failure;
   if (result.json && !result.json.ok) return `${result.json.error.type}: ${result.json.error.message}`;
   return null;
+}
+
+export const CANCELLED = -32800;
+
+export function serveError(result: ServeResult): string | null {
+  if (result.ok) return null;
+  const type = result.error.data?.type;
+  return type ? `${type}: ${result.error.message}` : result.error.message;
+}
+
+// One shape for results from the one-shot CLI and from the serve session.
+export interface Outcome {
+  error: string | null;
+  json: Record<string, any> | null;
+  durationMs: number;
+}
+
+export function cliOutcome(result: RunResult): Outcome {
+  const error = failureText(result);
+  return { error, json: !error && result.json?.ok ? result.json : null, durationMs: result.durationMs };
+}
+
+export function serveOutcome(result: ServeResult, started: number): Outcome {
+  return { error: serveError(result), json: result.ok ? result.result : null, durationMs: Date.now() - started };
 }
 
 export interface CapturedImage {

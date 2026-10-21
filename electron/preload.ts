@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { StderrEvent, StudioApi } from "../shared/types.js";
+import type { ServeEvent, StderrEvent, StudioApi } from "../shared/types.js";
 
 const api: StudioApi = {
   platform: process.platform,
@@ -18,6 +18,13 @@ const api: StudioApi = {
     const wrapped = (_event: IpcRendererEvent, payload: StderrEvent) => listener(payload);
     ipcRenderer.on("pymybot:stderr", wrapped);
     return () => ipcRenderer.removeListener("pymybot:stderr", wrapped);
+  },
+  serve: (id, request) => ipcRenderer.invoke("serve:call", id, request),
+  serveCancel: (id) => ipcRenderer.invoke("serve:cancel", id),
+  onServe: (listener) => {
+    const wrapped = (_event: IpcRendererEvent, payload: ServeEvent) => listener(payload);
+    ipcRenderer.on("serve:event", wrapped);
+    return () => ipcRenderer.removeListener("serve:event", wrapped);
   },
 };
 

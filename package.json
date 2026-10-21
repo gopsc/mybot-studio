@@ -1,5 +1,5 @@
 {
-  "name": "pymybot-studio",
+  "name": "mybot-studio",
   "version": "0.1.0",
   "description": "Cross-platform desktop studio for developing, running and visualizing pymybot robots",
   "license": "MIT",
@@ -17,8 +17,8 @@
     "dist": "npm run build && electron-builder"
   },
   "build": {
-    "appId": "dev.pymybot.studio",
-    "productName": "pymybot Studio",
+    "appId": "dev.mybot.studio",
+    "productName": "mybot Studio",
     "files": [
       "dist-electron/**",
       "dist/**",

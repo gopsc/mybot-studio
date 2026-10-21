@@ -17,12 +17,13 @@ const userData = mkdtempSync(path.join(os.tmpdir(), "studio-e2e-"));
 
 const app = await electron.launch({
   args: [path.join(root, "dist-electron", "electron", "main.js")],
-  env: { ...process.env, PYMYBOT_STUDIO_WORKSPACE: workspace, PYMYBOT_STUDIO_USER_DATA: userData },
+  // An empty model keeps the agent step offline and deterministic.
+  env: { ...process.env, MYBOT_STUDIO_WORKSPACE: workspace, MYBOT_STUDIO_USER_DATA: userData, MYBOT_MODEL: "" },
 });
 const errors = [];
 try {
   const page = await app.firstWindow();
-  page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+  page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}\n${e.stack}`));
   page.on("console", (m) => { if (m.type() === "error") errors.push(`console: ${m.text()}`); });
   await page.setViewportSize({ width: 1400, height: 900 }).catch(() => {});
   const shot = (name) => page.screenshot({ path: path.join(out, `${name}.png`) });
@@ -66,8 +67,52 @@ try {
   await page.waitForTimeout(500);
   await shot("03-sample");
 
+  step("activate a session and stream samples live");
+  await page.getByRole("button", { name: "⏻ 激活会话" }).click();
+  await page.locator(".statusbar .session-badge").waitFor({ timeout: 30000 });
+  await sample.locator("input[type=number]").first().fill("20");
+  await sample.getByRole("button", { name: "采样", exact: true }).click();
+  await page.waitForFunction(() => {
+    const match = /已收 (\d+) 个样本/.exec(document.querySelector(".panel > .panel-body:not([hidden])")?.textContent ?? "");
+    return match && Number(match[1]) >= 40;
+  }, null, { timeout: 30000 });
+  await shot("05-live-sample");
+  await sample.getByRole("button", { name: "停止采样" }).click();
+  await sample.getByRole("button", { name: "采样", exact: true }).waitFor({ timeout: 15000 });
+  if (await sample.locator(".err").count()) throw new Error(await sample.innerText());
+
+  step("hot SQL stays in the session");
+  await page.locator(".panel-tab", { hasText: "查询" }).click();
+  const query = page.locator(".panel > .panel-body:not([hidden])");
+  await query.locator("textarea").fill("INSERT INTO Timer (name) VALUES ('t9');");
+  await query.getByRole("button", { name: "应用到当前会话" }).click();
+  await query.getByText(/已生效：新增 1 个变量/).waitFor({ timeout: 15000 });
+  await page.locator(".panel-tab", { hasText: "硬件" }).click();
+  await page.locator(".panel > .panel-body:not([hidden])").getByText("t9", { exact: true }).waitFor();
+
+  step("agent waits for the session to end");
+  await page.locator(".panel-tab", { hasText: "智能体" }).click();
+  const agent = page.locator(".panel > .panel-body:not([hidden])");
+  if (!(await agent.locator(".composer textarea").isDisabled())) throw new Error("agent composer should be disabled during a session");
+
+  step("end the session");
+  await page.getByRole("button", { name: "⏏ 结束会话" }).click();
+  await page.locator(".statusbar .session-badge").waitFor({ state: "detached", timeout: 30000 });
+  await page.locator(".panel-tab", { hasText: "硬件" }).click();
+  await page.locator(".panel > .panel-body:not([hidden])").getByText("cl0", { exact: true }).waitFor();
+  // Hardware is re-read from the file once the session ends, dropping the hot SQL row.
+  await page.locator(".panel > .panel-body:not([hidden])").getByText("t9", { exact: true }).waitFor({ state: "detached", timeout: 15000 });
+
+  step("agent reports a missing model without a request");
+  await page.locator(".panel-tab", { hasText: "智能体" }).click();
+  await agent.locator(".composer textarea").fill("列出硬件");
+  await agent.getByRole("button", { name: "发送" }).click();
+  await agent.getByText(/MYBOT_MODEL.*对话已关闭/).waitFor({ timeout: 30000 });
+  await shot("06-agent");
+
   step("log panel recorded the commands");
   await page.locator(".panel-tab", { hasText: "日志" }).click();
+  await page.locator(".panel > .panel-body:not([hidden])").getByText("serve session.activate").first().waitFor();
   await shot("04-log");
 
   if (errors.length) throw new Error(`renderer errors:\n${errors.join("\n")}`);

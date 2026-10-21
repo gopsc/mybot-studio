@@ -100,3 +100,12 @@ table.grid th { background: var(--bg2); font-weight: 600; }
 .field { display: flex; flex-direction: column; gap: 3px; }
 .field small { color: var(--muted); }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+
+button.session-on { background: #1f5f3a; border-color: #2e8b57; color: #fff; }
+.session-badge { font-weight: 600; }
+.panel-body.agent { height: 100%; overflow: hidden; }
+.transcript { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 0 10px; }
+.turn { display: flex; flex-direction: column; gap: 4px; }
+.user-msg { align-self: flex-end; max-width: 80%; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; white-space: pre-wrap; }
+.composer { flex-wrap: nowrap; padding: 0 10px 6px; }
+.composer textarea { flex: 1; }

@@ -1,19 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PymybotRequest, RunResult, Settings, WorkspaceInfo } from "../shared/types";
+import type { PymybotRequest, RunResult, ServeEvent, ServeRequest, ServeResult, SessionStatus, Settings, WorkspaceInfo } from "../shared/types";
 import { Editor, type EditorHandle } from "./components/Editor";
 import { FileTree } from "./components/FileTree";
 import {
   AgentPanel, type CheckState, type HardwareItem, HardwarePanel, type LogEntry, LogPanel, OutputPanel, type Problem,
-  ProblemsPanel, QueryPanel, type RunState, SamplePanel,
+  ProblemsPanel, QueryPanel, type RunState, SamplePanel, type ServeCall,
 } from "./components/Panels";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { basename, extname, failureText, locateError, newId, studio } from "./util";
+import { basename, cliOutcome, extname, failureText, locateError, newId, serveError, serveOutcome, studio } from "./util";
 
 type PanelId = "problems" | "output" | "hardware" | "query" | "sample" | "agent" | "log";
 const PANELS: [PanelId, string][] = [
   ["problems", "问题"], ["output", "输出"], ["hardware", "硬件"], ["query", "查询"], ["sample", "采样"], ["agent", "智能体"], ["log", "日志"],
 ];
 const ACTIVATING = new Set(["run", "sample", "apply-sql", "agent"]);
+// Serve methods that own the robot and can be cancelled.
+const SERVE_WORK = new Set(["session.activate", "run", "apply-sql", "sample", "agent.ask"]);
+const INACTIVE: SessionStatus = { state: "Inactive", busy: null, agent: false };
+
+interface ActiveRun {
+  id: string;
+  command: string;
+  kind: "cli" | "serve";
+}
+
+const robotWork = (run: ActiveRun) => (run.kind === "cli" ? ACTIVATING : SERVE_WORK).has(run.command);
 
 const TEMPLATES: Record<string, string> = {
   ".sql": "CREATE TABLE Timer (name String);\nINSERT INTO Timer (name) VALUES ('t0');\n",
@@ -49,11 +60,13 @@ export function App() {
   const [allowHardware, setAllowHardware] = useState(false);
   const [timeout, setTimeoutSec] = useState(30);
   const [check, setCheck] = useState<CheckState>({ running: false, summary: null, problems: [] });
-  const [runState, setRunState] = useState<RunState>({ running: false, live: "", result: null });
+  const [runState, setRunState] = useState<RunState>({ running: false, live: "", outcome: null, session: false });
+  const [session, setSession] = useState<SessionStatus>(INACTIVE);
+  const [serveLog, setServeLog] = useState("");
   const [hardware, setHardware] = useState<HardwareItem[]>([]);
   const [hwError, setHwError] = useState<string | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
-  const [activeRuns, setActiveRuns] = useState<{ id: string; command: string }[]>([]);
+  const [activeRuns, setActiveRuns] = useState<ActiveRun[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [newFile, setNewFile] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -61,13 +74,38 @@ export function App() {
   const checkSeq = useRef(0);
   const hardwareSeq = useRef(0);
   const listeners = useRef(new Map<string, (chunk: string) => void>());
+  const serveListeners = useRef(new Map<string, (event: ServeEvent) => void>());
+  const serveStderr = useRef<((chunk: string) => void) | null>(null);
+  const live = session.state === "Active";
 
   useEffect(() => studio().onStderr(({ id, chunk }) => listeners.current.get(id)?.(chunk)), []);
+
+  useEffect(() => studio().onServe((event) => {
+    switch (event.type) {
+      case "session":
+        setSession(event.status);
+        break;
+      case "sample":
+      case "agent":
+        serveListeners.current.get(event.id)?.(event);
+        break;
+      case "confirm":
+        serveListeners.current.forEach((listener) => listener(event));
+        break;
+      case "stderr":
+        serveStderr.current?.(event.chunk);
+        setServeLog((text) => (text + event.chunk).slice(-200000));
+        break;
+      case "exit":
+        if (event.code !== 0) setNotice(`pymybot serve 已退出（${event.signal ?? event.code}），下次使用时自动重启`);
+        break;
+    }
+  }), []);
 
   const exec = useCallback(async (request: PymybotRequest, onStderr?: (chunk: string) => void): Promise<RunResult> => {
     const id = newId();
     listeners.current.set(id, (chunk) => onStderr?.(chunk));
-    setActiveRuns((runs) => [...runs, { id, command: request.command }]);
+    setActiveRuns((runs) => [...runs, { id, command: request.command, kind: "cli" }]);
     let result: RunResult;
     try {
       result = await studio().run(id, request);
@@ -80,7 +118,25 @@ export function App() {
       listeners.current.delete(id);
       setActiveRuns((runs) => runs.filter((run) => run.id !== id));
     }
-    setLog((entries) => [...entries.slice(-199), { at: Date.now(), request, result }]);
+    setLog((entries) => [...entries.slice(-199), { at: Date.now(), kind: "cli", request, result }]);
+    return result;
+  }, []);
+
+  const serveCall: ServeCall = useCallback(async (request: ServeRequest, options = {}) => {
+    const id = options.id ?? newId();
+    if (options.onEvent) serveListeners.current.set(id, options.onEvent);
+    setActiveRuns((runs) => [...runs, { id, command: request.method, kind: "serve" }]);
+    const started = Date.now();
+    let result: ServeResult;
+    try {
+      result = await studio().serve(id, request);
+    } catch (error) {
+      result = { ok: false, failure: "invalid-request", error: { code: -32603, message: error instanceof Error ? error.message : String(error) } };
+    } finally {
+      serveListeners.current.delete(id);
+      setActiveRuns((runs) => runs.filter((run) => run.id !== id));
+    }
+    setLog((entries) => [...entries.slice(-199), { at: started, kind: "serve", request, result, durationMs: Date.now() - started }]);
     return result;
   }, []);
 
@@ -119,14 +175,14 @@ export function App() {
   }, [exec, robot, script]);
 
   const refreshHardware = useCallback(async () => {
-    if (!robot) return;
+    if (!robot || live) return;
     const seq = ++hardwareSeq.current;
     const result = await exec({ command: "hardware", robot });
     if (seq !== hardwareSeq.current) return;
     const error = failureText(result);
     setHwError(error);
     setHardware(!error && result.json?.ok ? (result.json.hardware as HardwareItem[]) : []);
-  }, [exec, robot]);
+  }, [exec, robot, live]);
 
   useEffect(() => {
     if (robot) void refreshHardware();
@@ -184,16 +240,45 @@ export function App() {
     if (!robot || !script) return;
     for (const path of [robot, script]) if (dirty.has(path)) await saveFile(path);
     setPanel("output");
-    setRunState({ running: true, live: "", result: null });
-    const result = await exec(
-      { command: "run", robot, input: script, timeout, allowHardware, vars: {} },
-      (chunk) => setRunState((state) => ({ ...state, live: (state.live + chunk).slice(-200000) })),
-    );
-    setRunState((state) => ({ ...state, running: false, result }));
-  }, [robot, script, dirty, saveFile, exec, timeout, allowHardware]);
+    setRunState({ running: true, live: "", outcome: null, session: live });
+    const append = (chunk: string) => setRunState((state) => ({ ...state, live: (state.live + chunk).slice(-200000) }));
+    if (live) {
+      // The session's stderr is not tagged per request; attribute it to the run while it lasts.
+      serveStderr.current = append;
+      const started = Date.now();
+      try {
+        const result = await serveCall({ method: "run", input: script, timeout, vars: {} });
+        setRunState((state) => ({ ...state, running: false, outcome: serveOutcome(result, started) }));
+      } finally {
+        serveStderr.current = null;
+      }
+      return;
+    }
+    const result = await exec({ command: "run", robot, input: script, timeout, allowHardware, vars: {} }, append);
+    setRunState((state) => ({ ...state, running: false, outcome: cliOutcome(result) }));
+  }, [robot, script, dirty, saveFile, exec, serveCall, live, timeout, allowHardware]);
 
-  const stopAll = () => activeRuns.filter((run) => ACTIVATING.has(run.command)).forEach((run) => void studio().cancel(run.id));
-  const activating = activeRuns.some((run) => ACTIVATING.has(run.command));
+  const toggleSession = async () => {
+    if (live) {
+      const result = await serveCall({ method: "session.deactivate" });
+      setNotice(result.ok ? "会话已结束" : `结束会话失败：${serveError(result)}`);
+      return;
+    }
+    if (!robot) return;
+    if (dirty.has(robot)) await saveFile(robot);
+    const result = await serveCall({ method: "session.activate", robot, allowHardware });
+    if (result.ok) {
+      setHardware(result.result.hardware);
+      setHwError(null);
+      setNotice(`会话已激活：${robot}`);
+    } else if (result.failure !== "declined") {
+      setNotice(`激活失败：${serveError(result)}`);
+    }
+  };
+
+  const stopAll = () => activeRuns.filter(robotWork).forEach((run) => void (run.kind === "cli" ? studio().cancel(run.id) : studio().serveCancel(run.id)));
+  const activating = activeRuns.some(robotWork);
+  const sessionPending = activeRuns.some((run) => run.command === "session.activate" || run.command === "session.deactivate");
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -252,7 +337,7 @@ export function App() {
         <span className="workspace-name" title={ws?.root}>{ws ? basename(ws.root) : "未打开"}</span>
         <span className="sep" />
         <label>结构
-          <select value={robot} onChange={(e) => setRobot(e.target.value)} disabled={!ws}>
+          <select value={robot} onChange={(e) => setRobot(e.target.value)} disabled={!ws || live} title={live ? "会话进行中，结束会话后才能切换结构" : undefined}>
             <option value="">—</option>
             {files(".sql").map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
@@ -266,9 +351,14 @@ export function App() {
         <button onClick={() => void runCheck()} disabled={!robot}>检查</button>
         <button className="primary" onClick={() => void runScript()} disabled={!robot || !script || activating} title="F5">▶ 运行</button>
         <button className="danger" onClick={stopAll} disabled={!activating}>■ 停止</button>
+        <button className={live ? "session-on" : ""} onClick={() => void toggleSession()}
+          disabled={sessionPending || (!live && (!robot || activating || session.agent))}
+          title={live ? "清理驱动并结束会话" : session.agent ? "智能体对话占用机器人，先点「新对话」" : "激活一次，之后运行、采样、热更新 SQL 都复用这个会话"}>
+          {live ? "⏏ 结束会话" : "⏻ 激活会话"}
+        </button>
         <label>超时 <input type="number" min={1} max={3600} value={timeout} style={{ width: 60 }} onChange={(e) => setTimeoutSec(Number(e.target.value))} />s</label>
         <label className={allowHardware ? "hw-on" : ""} title="打开物理设备；执行前会再次确认">
-          <input type="checkbox" checked={allowHardware} onChange={(e) => setAllowHardware(e.target.checked)} />允许硬件
+          <input type="checkbox" checked={allowHardware} disabled={live} onChange={(e) => setAllowHardware(e.target.checked)} />允许硬件
         </label>
         <span className="grow" />
         <button onClick={() => setShowSettings(true)}>设置</button>
@@ -344,21 +434,24 @@ export function App() {
               }} />
             </div>
             <div className="panel-body" hidden={panel !== "output"}><OutputPanel state={runState} /></div>
-            <div className="panel-body" hidden={panel !== "hardware"}><HardwarePanel items={hardware} error={hwError} onRefresh={() => void refreshHardware()} /></div>
-            <div className="panel-body" hidden={panel !== "query"}><QueryPanel robot={robot} exec={exec} allowHardware={allowHardware} /></div>
+            <div className="panel-body" hidden={panel !== "hardware"}><HardwarePanel items={hardware} error={hwError} session={live} onRefresh={() => void refreshHardware()} /></div>
+            <div className="panel-body" hidden={panel !== "query"}><QueryPanel robot={robot} exec={exec} serveCall={serveCall} session={live} allowHardware={allowHardware}
+              onHardware={(items) => setHardware((old) => items.map((item) => ({ ...item, metadata: old.find((h) => h.name === item.name)?.metadata ?? {} })))} /></div>
             <div className="panel-body" hidden={panel !== "sample"}>
-              <SamplePanel robot={robot} exec={exec} hardware={hardware} allowHardware={allowHardware} visible={panel === "sample"} />
+              <SamplePanel robot={robot} exec={exec} serveCall={serveCall} session={live} hardware={hardware} allowHardware={allowHardware} visible={panel === "sample"} />
             </div>
             <div className="panel-body" hidden={panel !== "agent"}>
-              <AgentPanel robot={robot} exec={exec} hardware={hardware} allowHardware={allowHardware} settings={settings} />
+              <AgentPanel robot={robot} serveCall={serveCall} session={session} hardware={hardware} allowHardware={allowHardware} settings={settings} />
             </div>
-            <div className="panel-body" hidden={panel !== "log"}><LogPanel entries={log} onClear={() => setLog([])} /></div>
+            <div className="panel-body" hidden={panel !== "log"}><LogPanel entries={log} serveLog={serveLog} onClear={() => { setLog([]); setServeLog(""); }} /></div>
           </div>
         </div>
       </div>
 
       <div className={`statusbar${activeRuns.length ? " busy" : ""}`}>
         <span>{activeRuns.length ? `运行中：${activeRuns.map((r) => r.command).join(", ")}` : "就绪"}</span>
+        {live && <span className="session-badge" title={session.robot}>● 会话 {basename(session.robot ?? "")}{session.allowHardware ? "（硬件）" : ""}</span>}
+        {session.agent && <span>● 智能体对话</span>}
         {allowHardware && <span>⚠ 允许硬件</span>}
         {notice && <span>{notice}</span>}
         <span style={{ marginLeft: "auto" }}>{ws?.root ?? ""}</span>
